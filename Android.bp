@@ -1,0 +1,20 @@
+cc_defaults {
+    name: "libaudioclient_tests_audiotrack_defaults",
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}
+
+cc_binary {
+    name: "test_audiotrack",
+    defaults: ["libaudioclient_tests_audiotrack_defaults"],
+    srcs: ["main.cpp"],
+    shared_libs: [
+        "libaudioclient",
+        "libbinder",
+        "libcutils",
+        "libutils",
+    ],
+}
+
