@@ -43,21 +43,26 @@ struct chunk_fmt {
     uint16_t bits_per_sample;
 };
 
-static int write_stop = 0;
+static int stop_flag = 0;
 
 void stream_close(int sig)
 {
     /* allow the stream to be closed gracefully */
     signal(sig, SIG_IGN);
-    write_stop = 1;
+    stop_flag = 1;
 }
 
 void callback(int event __unused, void* user __unused, void *info __unused)
 {
 }
 
-int main(int argc __unused, char **argv)
+void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned int channels,
+                 unsigned int rate, unsigned int bits, unsigned int period_size,
+                 unsigned int period_count)
 {
+    char *buffer;
+    int size;
+    int num_read;
     audio_stream_type_t streamType;
     uint32_t sampleRate;
     audio_format_t format;
@@ -74,10 +79,149 @@ int main(int argc __unused, char **argv)
     sp<MemoryDealer> heap;
     audio_offload_info_t offloadInfo = AUDIO_INFO_INITIALIZER;
     status_t status;
-    //char statusStr[MAX_OUTPUT_FILE_LINE_LENGTH];
     bool offload = false;
     bool fast = false;
+    sp<AudioTrack> track = new AudioTrack();
 
+    if (card == 0) {
+        flags = AUDIO_OUTPUT_FLAG_PRIMARY;
+    } else if (card == 1) {
+        flags = AUDIO_OUTPUT_FLAG_FAST;
+    } else if (card == 2) {
+        flags = AUDIO_OUTPUT_FLAG_DEEP_BUFFER;
+    } else {
+        flags = AUDIO_OUTPUT_FLAG_NONE;
+    }
+
+    if (device >= AUDIO_STREAM_VOICE_CALL && device <= AUDIO_STREAM_ECALL) {
+        streamType = (audio_stream_type_t)device;
+    } else {
+        streamType = AUDIO_STREAM_MUSIC;
+    }
+
+    sampleRate = rate;
+    if (bits == 32)
+        format = AUDIO_FORMAT_PCM_32_BIT;
+    else if (bits == 24)
+        format = AUDIO_FORMAT_PCM_8_24_BIT;
+    else if (bits == 16)
+        format = AUDIO_FORMAT_PCM_16_BIT;
+    else
+        format = AUDIO_FORMAT_INVALID;
+        
+
+    if (channels == 4)
+        channelMask = AUDIO_CHANNEL_OUT_QUAD;
+    else if (channels == 6)
+        channelMask = AUDIO_CHANNEL_OUT_5POINT1;
+    else
+        channelMask = AUDIO_CHANNEL_OUT_STEREO;
+    //frameCount = 48000;
+    frameCount = period_size * period_count;
+    notificationFrames = frameCount;
+    useSharedBuffer = 0;
+    sessionId = AUDIO_SESSION_NONE;
+    usage = AUDIO_USAGE_MEDIA;
+    contentType = AUDIO_CONTENT_TYPE_MUSIC;
+    
+    if (useSharedBuffer != 0) {
+        size_t heapSize = audio_channel_count_from_out_mask(channelMask) *
+                audio_bytes_per_sample(format) * frameCount;
+        heap = new MemoryDealer(heapSize, "AudioTrack Heap Base");
+        sharedBuffer = heap->allocate(heapSize);
+        frameCount = 0;
+        notificationFrames = 0;
+    }
+    if ((flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) != 0) {
+        offloadInfo.sample_rate = sampleRate;
+        offloadInfo.channel_mask = channelMask;
+        offloadInfo.format = format;
+        offload = true;
+    }
+    if ((flags & AUDIO_OUTPUT_FLAG_FAST) != 0) {
+        fast = true;
+    }
+#if 0
+    /* set music stream */
+    AudioSystem::setStreamVolumeIndex(AUDIO_STREAM_MUSIC,
+                                           6,
+                                           AUDIO_DEVICE_OUT_AUX_DIGITAL);
+#endif
+#if 0
+    /* get device states */
+    fprintf(stderr, "get connnet state speaker:%d, aux:%d\n",
+        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_SPEAKER, ""),
+        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_AUX_DIGITAL, ""));
+    /* set device states */
+    fprintf(stderr, "set connnet ret aux:%d, speaker:%d\n",
+        AudioSystem::setDeviceConnectionState(AUDIO_DEVICE_OUT_AUX_DIGITAL, AUDIO_POLICY_DEVICE_STATE_AVAILABLE, "", ""),
+        AudioSystem::setDeviceConnectionState(AUDIO_DEVICE_OUT_SPEAKER, AUDIO_POLICY_DEVICE_STATE_UNAVAILABLE, "", ""));
+    usleep(500 * 1000);
+    fprintf(stderr, "get connnet state speaker:%d, aux:%d\n",
+        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_SPEAKER, ""),
+        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_AUX_DIGITAL, ""));
+#endif
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.content_type = contentType;
+    attributes.usage = usage;
+
+    track->set(streamType,
+               sampleRate,
+               format,
+               channelMask,
+               frameCount,
+               flags,
+               (fast || offload) ? callback : nullptr,
+               nullptr,
+               notificationFrames,
+               sharedBuffer,
+               false,
+               sessionId,
+               ((fast && sharedBuffer == 0) || offload) ?
+                       AudioTrack::TRANSFER_CALLBACK : AudioTrack::TRANSFER_DEFAULT,
+               offload ? &offloadInfo : nullptr,
+               getuid(),
+               getpid(),
+               &attributes,
+               false,
+               1.0f,
+               AUDIO_PORT_HANDLE_NONE);
+    status = track->initCheck();
+    if (status != NO_ERROR) {
+        return;
+    }
+
+    size = track->getBufferSizeInFrames();
+    buffer = (char *)malloc(size);
+    if (!buffer) {
+        fprintf(stderr, "Unable to allocate %d bytes\n", size);
+        //free(buffer);
+        return;
+    }
+
+    printf("Playing sample: %u ch, %u hz, %u bit\n", channels, rate, bits);
+
+    /* catch ctrl-c to shutdown cleanly */
+    signal(SIGINT, stream_close);
+
+    track->start();
+    do {
+        num_read = fread(buffer, 1, size, file);
+        if (num_read > 0) {
+            if (track->write(buffer, num_read, true) < 0) {
+                fprintf(stderr, "Error playing sample\n");
+                break;
+            }
+        }
+    } while (!stop_flag && num_read > 0);
+
+    track->stop();
+
+    free(buffer);
+}
+
+int main(int argc __unused, char **argv)
+{
 /** copy from tinyplay start **/
     FILE *file;
     struct riff_wave_header riff_wave_header;
@@ -89,10 +233,6 @@ int main(int argc __unused, char **argv)
     unsigned int period_count = 4;
     char *filename;
     int more_chunks = 1;
-
-    char *buffer;
-    int size;
-    int num_read;
 
     if (argc < 2) {
         fprintf(stderr, "Usage: %s file.wav [-D card] [-d device] [-p period_size]"
@@ -161,122 +301,9 @@ int main(int argc __unused, char **argv)
         if (*argv)
             argv++;
     }
-/** copy from tinyplay end **/
-
-    streamType = AUDIO_STREAM_MUSIC;
-    sampleRate = 48000;
-    format = AUDIO_FORMAT_PCM_16_BIT;
-    if (period_count == 4)
-        channelMask = AUDIO_CHANNEL_OUT_QUAD;
-    else if (period_count == 6)
-        channelMask = AUDIO_CHANNEL_OUT_5POINT1;
-    else 
-        channelMask = AUDIO_CHANNEL_OUT_STEREO;
-    frameCount = 48000;
-    flags = AUDIO_OUTPUT_FLAG_DEEP_BUFFER;
-    notificationFrames = frameCount;
-    useSharedBuffer = 0;
-    sessionId = AUDIO_SESSION_NONE;
-    usage = AUDIO_USAGE_MEDIA;
-    contentType = AUDIO_CONTENT_TYPE_MUSIC;
-    
-    if (useSharedBuffer != 0) {
-        size_t heapSize = audio_channel_count_from_out_mask(channelMask) *
-                audio_bytes_per_sample(format) * frameCount;
-        heap = new MemoryDealer(heapSize, "AudioTrack Heap Base");
-        sharedBuffer = heap->allocate(heapSize);
-        frameCount = 0;
-        notificationFrames = 0;
-    }
-    if ((flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) != 0) {
-        offloadInfo.sample_rate = sampleRate;
-        offloadInfo.channel_mask = channelMask;
-        offloadInfo.format = format;
-        offload = true;
-    }
-    if ((flags & AUDIO_OUTPUT_FLAG_FAST) != 0) {
-        fast = true;
-    }
-#if 0
-    /* set music stream */
-    AudioSystem::setStreamVolumeIndex(AUDIO_STREAM_MUSIC,
-                                           6,
-                                           AUDIO_DEVICE_OUT_AUX_DIGITAL);
-#endif
-#if 0
-    /* get device states */
-    fprintf(stderr, "get connnet state speaker:%d, aux:%d\n",
-        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_SPEAKER, ""),
-        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_AUX_DIGITAL, ""));
-    /* set device states */
-    fprintf(stderr, "set connnet ret aux:%d, speaker:%d\n",
-        AudioSystem::setDeviceConnectionState(AUDIO_DEVICE_OUT_AUX_DIGITAL, AUDIO_POLICY_DEVICE_STATE_AVAILABLE, "", ""),
-        AudioSystem::setDeviceConnectionState(AUDIO_DEVICE_OUT_SPEAKER, AUDIO_POLICY_DEVICE_STATE_UNAVAILABLE, "", ""));
-    usleep(500 * 1000);
-    fprintf(stderr, "get connnet state speaker:%d, aux:%d\n",
-        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_SPEAKER, ""),
-        AudioSystem::getDeviceConnectionState(AUDIO_DEVICE_OUT_AUX_DIGITAL, ""));
-#endif
-    memset(&attributes, 0, sizeof(attributes));
-    attributes.content_type = contentType;
-    attributes.usage = usage;
-    
-    sp<AudioTrack> track = new AudioTrack();
-    
-    track->set(streamType,
-               sampleRate,
-               format,
-               channelMask,
-               frameCount,
-               flags,
-               (fast || offload) ? callback : nullptr,
-               nullptr,
-               notificationFrames,
-               sharedBuffer,
-               false,
-               sessionId,
-               ((fast && sharedBuffer == 0) || offload) ?
-                       AudioTrack::TRANSFER_CALLBACK : AudioTrack::TRANSFER_DEFAULT,
-               offload ? &offloadInfo : nullptr,
-               getuid(),
-               getpid(),
-               &attributes,
-               false,
-               1.0f,
-               AUDIO_PORT_HANDLE_NONE);
-    status = track->initCheck();
-    //sprintf(statusStr, "\n#### Test %u status %d\n", testCount, status);
-    //write(outputFileFd, statusStr, strlen(statusStr));
-    if (status != NO_ERROR) {
-        //return status;
-        goto exit_close_file;
-    }
-    //track->dump(outputFileFd, args);
-
-    size = track->getBufferSizeInFrames();
-    buffer = (char *)malloc(size);
-    if (!buffer) {
-        fprintf(stderr, "Unable to allocate %d bytes\n", size);
-        goto exit_close_file;
-    }
-
-
-    track->start();
-    do {
-        num_read = fread(buffer, 1, size, file);
-        if (num_read > 0) {
-            //if (pcm_write(pcm, buffer, num_read)) {
-            //    fprintf(stderr, "Error playing sample\n");
-            //    break;
-            //}
-            track->write(buffer, num_read, true);
-        }
-    } while (!write_stop && num_read > 0);
-
-    track->stop();
-
-    free(buffer);
-exit_close_file:
+    play_sample(file, card, device, chunk_fmt.num_channels, chunk_fmt.sample_rate,
+                chunk_fmt.bits_per_sample, period_size, period_count);
     fclose(file);
+/** copy from tinyplay end **/
     return 0;
 }
