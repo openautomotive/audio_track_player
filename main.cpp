@@ -83,20 +83,36 @@ void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned in
     bool fast = false;
     sp<AudioTrack> track = new AudioTrack();
 
-    if (card == 0) {
+    if (card == 1) {
         flags = AUDIO_OUTPUT_FLAG_PRIMARY;
-    } else if (card == 1) {
-        flags = AUDIO_OUTPUT_FLAG_FAST;
     } else if (card == 2) {
+        flags = AUDIO_OUTPUT_FLAG_FAST;
+    } else if (card == 3) {
         flags = AUDIO_OUTPUT_FLAG_DEEP_BUFFER;
     } else {
         flags = AUDIO_OUTPUT_FLAG_NONE;
     }
 
-    if (device >= AUDIO_STREAM_VOICE_CALL && device <= AUDIO_STREAM_ECALL) {
+    if (device == AUDIO_STREAM_MUSIC) {
+        streamType = AUDIO_STREAM_MUSIC;
+        usage = AUDIO_USAGE_MEDIA;
+        contentType = AUDIO_CONTENT_TYPE_MUSIC;
+    } else if (device == AUDIO_STREAM_TTS) {
+        streamType = AUDIO_STREAM_TTS;
+        usage = AUDIO_USAGE_ASSISTANT;
+        contentType = AUDIO_CONTENT_TYPE_AUDIO_ASSISTANT;
+    } else if (device == AUDIO_STREAM_NAVI) {
+        streamType = AUDIO_STREAM_NAVI;
+        usage = AUDIO_USAGE_ASSISTANCE_NAVIGATION_GUIDANCE;
+        contentType = AUDIO_CONTENT_TYPE_NAVI_GUIDANCE;
+    } else if (device > AUDIO_STREAM_VOICE_CALL && device <= AUDIO_STREAM_ECALL) {
         streamType = (audio_stream_type_t)device;
+        usage = AUDIO_USAGE_MEDIA;
+        contentType = AUDIO_CONTENT_TYPE_MUSIC;
     } else {
         streamType = AUDIO_STREAM_MUSIC;
+        usage = AUDIO_USAGE_MEDIA;
+        contentType = AUDIO_CONTENT_TYPE_MUSIC;
     }
 
     sampleRate = rate;
@@ -121,9 +137,12 @@ void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned in
     notificationFrames = frameCount;
     useSharedBuffer = 0;
     sessionId = AUDIO_SESSION_NONE;
-    usage = AUDIO_USAGE_MEDIA;
-    contentType = AUDIO_CONTENT_TYPE_MUSIC;
-    
+
+    if ((flags & AUDIO_OUTPUT_FLAG_FAST) != 0) {
+        /**/
+        useSharedBuffer = true;
+    }
+
     if (useSharedBuffer != 0) {
         size_t heapSize = audio_channel_count_from_out_mask(channelMask) *
                 audio_bytes_per_sample(format) * frameCount;
@@ -182,7 +201,7 @@ void play_sample(FILE *file, unsigned int card, unsigned int device, unsigned in
                offload ? &offloadInfo : nullptr,
                getuid(),
                getpid(),
-               &attributes,
+               &attributes, /*&attributes*/
                false,
                1.0f,
                AUDIO_PORT_HANDLE_NONE);
